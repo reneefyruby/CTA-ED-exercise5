@@ -1,0 +1,583 @@
+---
+title: "CTA-ED Exercise 5"
+author: "Renee"
+date: "2026-03-11"
+output: html_document
+---
+
+## Introduction
+
+The hands-on exercise for this week focuses on: 1) estimating a topic model ; 2) interpreting and visualizing results.
+Remember that you will need to: 1) comment your code and 2) write out the interpretation of your results.
+
+You will learn how to:
+
+* Generate document-term-matrices in format appropriate for topic modelling
+* Estimate a topic model using the `quanteda` and `topicmodels` package
+* Visualize results
+* Reverse engineer a test of model accuracy
+* Run some validation tests
+
+## Setup 
+
+Before proceeding, we'll load the packages we will need for this tutorial.
+
+```{r, message=F}
+library(tidyverse) # loads dplyr, ggplot2, and others
+library(stringr) # to handle text elements
+library(tidytext) # includes set of functions useful for manipulating text
+library(topicmodels) # to estimate topic models
+
+
+library(gutenbergr) # to get text data
+library(scales)
+library(tm)
+library(ggthemes) # to make your plots look nice
+library(readr)
+library(quanteda)
+library(quanteda.textmodels)
+```
+
+You may need to install the preText package if you haven't done so yet. For that you will need to run the next code chunk (it is currently set to 'eval=F', which tells R 'do not execute this code chunk').
+That package is not readily available on through RStudio directly. It needs to be downloaded from the Github repository set up by its creater Matthew J Denny. We can do that using the command install_github(). This command is part of the 'devtools' package, which you will need to install as well (if you haven't done so already). The devtools package is directly available through R so it can be installed with the usual command install_packages. 
+
+```{r, message=F, eval=F}
+#install_package(devtools)
+devtools::install_github("matthewjdenny/preText")
+library(preText)
+```
+
+
+# Data collection
+We'll be using data from Alexis de Tocqueville's "Democracy in America." 
+
+We have already downloaded some data for you, but we also included the code to download it yourself (it is currently set to 'eval=F' so it won't run unless you remove the eval=F argument or you run the chunk directly. 
+
+The code downloads these data, both Volume 1 and Volume 2, and combine them into one data frame. For this, we'll be using the <tt>gutenbergr</tt> package, which allows the user to download text data from over 60,000 out-of-copyright books. The ID for each book appears in the url for the book selected after a search on [https://www.gutenberg.org/ebooks/](https://www.gutenberg.org/ebooks/).
+
+This example is adapted by [Text Mining with R: A Tidy Approach](https://www.tidytextmining.com/) by Julia Silge and David Robinson.
+
+![](data/topicmodels/gutenberg.gif){width=100%}
+
+Here, we see that Volume of Tocqueville's "Democracy in America" is stored as "815". A separate search reveals that Volume 2 is stored as "816".
+
+```{r, eval=F}
+tocq <- gutenberg_download(c(815, 816), 
+                            meta_fields = "author")
+```
+
+Or we can read the dataset we already downloaded for you in the following way:
+
+```{r}
+tocq  <- readRDS(gzcon(url("https://github.com/cjbarrie/CTA-ED/blob/main/data/topicmodels/tocq.RDS?raw=true")))
+```
+
+Once we have read in these data, we convert it into a different data shape: the document-term-matrix. We also create a new columns, which we call "booknumber" that recordss whether the term in question is from Volume 1 or Volume 2. To convert from tidy into "DocumentTermMatrix" format we can first use `unnest_tokens()` as we have done in past exercises, remove stop words, and then use the `cast_dtm()` function to convert into a "DocumentTermMatrix" object.
+
+```{r}
+tocq_words <- tocq %>%
+  mutate(booknumber = ifelse(gutenberg_id==815, "DiA1", "DiA2")) %>%
+  unnest_tokens(word, text) %>%
+  filter(!is.na(word)) %>%
+  count(booknumber, word, sort = TRUE) %>%
+  ungroup() %>%
+  anti_join(stop_words)
+
+tocq_dtm <- tocq_words %>%
+  cast_dtm(booknumber, word, n)
+
+tm::inspect(tocq_dtm)
+```
+
+We see here that the data are now stored as a "DocumentTermMatrix." In this format, the matrix records the term (as equivalent of a column) and the document (as equivalent of row), and the number of times the term appears in the given document. Many terms will not appear in the document, meaning that the matrix will be stored as "sparse," meaning there will be a preponderance of zeroes. Here, since we are looking only at two documents that both come from a single volume set, the sparsity is relatively low (only 27%). In most applications, the sparsity will be a lot higher, approaching 99% or more.
+
+Estimating our topic model is then relatively simple. All we need to do if specify how many topics that we want to search for, and we can also set our seed, which is needed to reproduce the same results each time (as the model is a generative probabilistic one, meaning different random iterations will produce different results).
+
+```{r}
+tocq_lda <- LDA(tocq_dtm, k = 10, control = list(seed = 1234))
+```
+
+After this we can extract the per-topic-per-word probabilities, called "β" from the model:
+
+```{r}
+tocq_topics <- tidy(tocq_lda, matrix = "beta")
+
+head(tocq_topics, n = 10)
+```
+
+We now have data stored as one topic-per-term-per-row. The betas listed here represent the probability that the given term belongs to a given topic. So, here, we see that the term "democratic" is most likely to belong to topic 4. Strictly, this probability represents the probability that the term is generated from the topic in question.
+
+We can then plots the top terms, in terms of beta, for each topic as follows:
+
+```{r}
+tocq_top_terms <- tocq_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+tocq_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol = 4) +
+  scale_y_reordered() +
+  theme_tufte(base_family = "Helvetica")
+
+```
+
+But how do we actually evaluate these topics? Here, the topics all seem pretty similar. 
+
+## Evaluating topic model
+
+Well, one way to evaluate the performance of unspervised forms of classification is by testing our model on an outcome that is already known. 
+
+Here, two topics that are most obvious are the 'topics' Volume 1 and Volume 2 of Tocqueville's "Democracy in America." Volume 1 of Tocqueville's work deals more obviously with abstract constitutional ideas and questions of race; Volume 2 focuses on more esoteric aspects of American society. Listen an "In Our Time" episode with Melvyn Bragg discussing Democracy in America [here](https://www.bbc.co.uk/programmes/b09vyw0x).
+
+Given these differences in focus, we might think that a generative model could accurately assign to topic (i.e., Volume) with some accuracy.
+
+### Plot relative word frequencies
+
+First let's have a look and see whether there really are words obviously distinguishing the two Volumes. 
+
+```{r}
+
+tidy_tocq <- tocq %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words)
+
+## Count most common words in both
+tidy_tocq %>%
+  count(word, sort = TRUE)
+
+bookfreq <- tidy_tocq %>%
+  mutate(booknumber = ifelse(gutenberg_id==815, "DiA1", "DiA2")) %>%
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(booknumber, word) %>%
+  group_by(booknumber) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(booknumber, proportion)
+
+ggplot(bookfreq, aes(x = DiA1, y = DiA2, color = abs(DiA1 - DiA2))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme_tufte(base_family = "Helvetica") +
+  theme(legend.position="none", 
+        strip.background = element_blank(), 
+        strip.text.x = element_blank()) +
+  labs(x = "Tocqueville DiA 2", y = "Tocqueville DiA 1") +
+  coord_equal()
+
+
+```
+
+We see that there do seem to be some marked distinguishing characteristics. In the plot above, for example, we see that more abstract notions of state systems appear with greater frequency in Volume 1 while Volume 2 seems to contain words specific to America (e.g., "north" and "south") with greater frequency. The way to read the above plot is that words positioned further away from the diagonal line appear with greater frequency in one volume versus the other.
+
+
+### Split into chapter documents
+
+In the below, we first separate the volumes into chapters, then we repeat the same procedure as above. The only difference now is that instead of two documents representing the two full volumes of Tocqueville's work, we now have 132 documents, each representing an individual chapter. Notice now that the sparsity is much increased: around 96%. 
+
+```{r}
+
+tocq <- tocq %>%
+  filter(!is.na(text))
+
+# Divide into documents, each representing one chapter
+tocq_chapter <- tocq %>%
+  mutate(booknumber = ifelse(gutenberg_id==815, "DiA1", "DiA2")) %>%
+  group_by(booknumber) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter ", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, booknumber, chapter)
+
+# Split into words
+tocq_chapter_word <- tocq_chapter %>%
+  unnest_tokens(word, text)
+
+# Find document-word counts
+tocq_word_counts <- tocq_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+
+tocq_word_counts
+
+# Cast into DTM format for LDA analysis
+
+tocq_chapters_dtm <- tocq_word_counts %>%
+  cast_dtm(document, word, n)
+
+tm::inspect(tocq_chapters_dtm)
+
+```
+
+We then re-estimate the topic model with this new DocumentTermMatrix object, specifying k equal to 2. This will enable us to evaluate whether a topic model is able to generatively assign to volume with accuracy.
+
+```{r}
+tocq_chapters_lda <- LDA(tocq_chapters_dtm, k = 2, control = list(seed = 1234))
+```
+
+After this, it is worth looking at another output of the latent dirichlet allocation procedure. The γ probability represents the per-document-per-topic probability or, in other words, the probability that a given document (here: chapter) belongs to a particular topic (and here, we are assuming these topics represent volumes).
+
+The gamma values are therefore the estimated proportion of words within a given chapter allocated to a given volume. 
+
+```{r}
+
+tocq_chapters_gamma <- tidy(tocq_chapters_lda, matrix = "gamma")
+tocq_chapters_gamma
+
+```
+
+### Examine consensus
+
+Now that we have these topic probabilities, we can see how well our unsupervised learning did at distinguishing the two volumes generatively just from the words contained in each chapter.
+
+```{r}
+
+# First separate the document name into title and chapter
+
+tocq_chapters_gamma <- tocq_chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+
+tocq_chapter_classifications <- tocq_chapters_gamma %>%
+  group_by(title, chapter) %>%
+  top_n(1, gamma) %>%
+  ungroup()
+
+tocq_book_topics <- tocq_chapter_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  top_n(1, n) %>%
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+tocq_chapter_classifications %>%
+  inner_join(tocq_book_topics, by = "topic") %>%
+  filter(title != consensus)
+
+# Look document-word pairs were to see which words in each documents were assigned
+# to a given topic
+
+assignments <- augment(tocq_chapters_lda, data = tocq_chapters_dtm)
+assignments
+
+assignments <- assignments %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE) %>%
+  inner_join(tocq_book_topics, by = c(".topic" = "topic"))
+
+assignments %>%
+  count(title, consensus, wt = count) %>%
+  group_by(title) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, title, fill = percent)) +
+  geom_tile() +
+  scale_fill_gradient2(high = "red", label = percent_format()) +
+  geom_text(aes(x = consensus, y = title, label = scales::percent(percent))) +
+  theme_tufte(base_family = "Helvetica") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Book words assigned to",
+       y = "Book words came from",
+       fill = "% of assignments")
+
+```
+
+Not bad! We see that the model estimated with accuracy 91% of chapters in Volume 2 and 79% of chapters in Volume 1
+
+## Validation
+
+In the articles by @ying_topics_2021 and @denny_text_2018 from this and previous weeks, we read about potential validation techniques. 
+
+In this section, we'll be using the `preText` package mentioned in @denny_text_2018 to see the impact of different pre-processing choices on our text. Here, I am adapting from a [tutorial](http://www.mjdenny.com/getting_started_with_preText.html) by Matthew Denny.
+
+First we need to reformat our text into a `quanteda` corpus object. 
+
+```{r}
+
+# load in corpus of Tocequeville text data.
+corp <- corpus(tocq, text_field = "text")
+# use first 10 documents for example
+documents <- corp[sample(1:30000,1000)]
+# take a look at the document names
+print(names(documents[1:10]))
+
+```
+And now we are ready to preprocess in different ways. Here, we are including n-grams so we are preprocessing the text in 128 different ways. This takes about ten minutes to run on a machine with 8GB RAM. 
+
+```{r, eval = F}
+
+preprocessed_documents <- factorial_preprocessing(
+    documents,
+    use_ngrams = TRUE,
+    infrequent_term_threshold = 0.2,
+    verbose = FALSE)
+
+```
+
+We can then get the results of our pre-processing, comparing the distance between documents that have been processed in different ways. 
+
+
+```{r, eval = F}
+
+preText_results <- preText(
+    preprocessed_documents,
+    dataset_name = "Tocqueville text",
+    distance_method = "cosine",
+    num_comparisons = 20,
+    verbose = FALSE)
+
+```
+
+And we can plot these accordingly. 
+
+```{r, eval = F}
+preText_score_plot(preText_results)
+```
+
+![](data/topicmodels/pretext_results.png){width=100%}
+
+## Exercises
+1. Choose another book or set of books from Project Gutenberg
+2. Run your own topic model on these books, changing the k of topics, and evaluating accuracy.
+3. Validate different pre-processing techniques using `preText` on the new book(s) of your choice. 
+
+```{r}
+library(tidyverse)   # data manipulation and plotting
+library(stringr)    
+library(tidytext)    # text mining
+library(topicmodels) # LDA topic modeling
+library(gutenbergr)  # download Gutenberg books
+library(quanteda)    # text preprocessing
+library(preText)     # preprocessing validation
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tm)          # text matrix operations
+library(kableExtra)
+library(scales)
+library(broom)
+```
+
+```{r}
+# Download Gutenberg books
+titles <- c("Pride and Prejudice",
+            "The War of the Worlds",
+            "Twenty Thousand Leagues under the Sea")
+
+# download books and keep title field
+books <- gutenberg_works(title %in% titles) %>%
+  gutenberg_download(meta_fields = "title")
+```
+
+```{r}
+# Split each book into chapters (each chapter as a document)
+by_chapter <- books %>%
+  group_by(title) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%    # remove text before first chapter
+  unite(doc_id, title, chapter, remove = FALSE)  # create unique document ID
+```
+
+```{r}
+# Tokenize, clean, remove stop words
+data("stop_words")
+
+tidy_books <- by_chapter %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word") %>%  # remove stop words
+  filter(str_detect(word, "[a-z]"))  # keep only alphabetic words
+```
+
+```{r}
+# Create document-term matrix (DTM)
+dtm <- tidy_books %>%
+  count(doc_id, word) %>%
+  cast_dtm(doc_id, word, n) 
+
+# inspect DTM
+dtm
+```
+
+Latent Dirichlet Allocation (LDA) is a generative probabilistic model that assumes 
+documents are mixtures of topics and topics are distributions over words. 
+We estimate several models with different numbers of topics (k) to compare their interpretability.
+
+```{r}
+# Choose number of topics k
+k_values <- c(2, 3, 4, 5, 6, 7, 8, 10)
+perplexity_values <- map_dbl(k_values, function(k){
+  lda <- LDA(dtm, k = k, control = list(seed = 123))
+  perplexity(lda)
+})
+
+# plot perplexity curve
+data.frame(k = k_values, perplexity = perplexity_values) %>%
+  ggplot(aes(x = k, y = perplexity)) +
+  geom_line() + geom_point() +
+  labs(title = "Perplexity vs number of topics",
+       x = "k", y = "Perplexity")
+```
+Perplexity decreases slowly after k=5. Combined with topic interpretability (as we will see), we choose k=5 for detailed analysis.
+
+The model with k = 3 produces very broad topics combining themes from multiple books.
+The model with k = 5 produces clearer thematic clusters such as social relations (Pride and Prejudice), exploration and sea travel (Twenty Thousand Leagues Under the Sea), and science-fiction conflict (The War of the Worlds).
+The model with k = 8 produces more fragmented topics with overlapping terms.
+```{r}
+# Estimate LDA models with different k
+set.seed(123)
+lda_3 <- LDA(dtm, k = 3, control = list(seed = 123))
+lda_5 <- LDA(dtm, k = 5, control = list(seed = 123))
+lda_8 <- LDA(dtm, k = 8, control = list(seed = 123))
+```
+
+```{r}
+# Examine top terms per topic
+## extract beta (term-topic probabilities)
+lda_terms_5 <- tidy(lda_5, matrix = "beta")
+
+## top 10 terms per topic
+top_terms_5 <- lda_terms_5 %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+## print
+top_terms_5 %>% 
+  kable(col.names = c("Topic", "Word", "Probability")) %>%
+  kable_styling(full_width = F)
+```
+
+
+```{r}
+# Visualise Top Words per Topic
+top_terms_5 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered() +
+  labs(x = "Probability in topic",
+       y = "Term",
+       title = "Top 10 terms per topic (k=5)")
+```
+
+Following section 21.3.3 of the tutorial, we use the k=3 model (since we have three books) to test whether LDA can correctly assign chapters to the corresponding books.
+```{r}
+# Evaluate model accuracy using known book labels
+## extract gamma (document-topic probabilities)
+chapters_gamma <- tidy(lda_3, matrix = "gamma")
+
+# separate document name into book title and chapter
+chapters_gamma <- chapters_gamma %>%
+  separate(document, c("book", "chapter"), sep = "_", convert = TRUE)
+
+# choose the topic with highest probability for each chapter
+chapter_class <- chapters_gamma %>%
+  group_by(book, chapter) %>%
+  slice_max(gamma, n = 1) %>%
+  ungroup()
+
+# determine the consensus topic for each book (the topic that appears most often in that book)
+book_consensus <- chapter_class %>%
+  count(book, topic) %>%
+  group_by(book) %>%
+  slice_max(n, n = 1) %>%
+  ungroup() %>%
+  transmute(book, consensus_topic = topic)
+
+# join consensus topic and check correctness
+chapter_class <- chapter_class %>%
+  left_join(book_consensus, by = "book") %>%
+  mutate(correct = (topic == consensus_topic))
+
+# overall accuracy
+accuracy_overall <- mean(chapter_class$correct)
+cat("Overall accuracy: ", round(accuracy_overall * 100, 2), "%\n")
+
+# accuracy by book
+chapter_class %>%
+  group_by(book) %>%
+  summarise(Accuracy = mean(correct)) %>%
+  knitr::kable(digits = 3, col.names = c("Book", "Accuracy"))
+```
+
+```{r}
+# Plot heatmap showing assignment proportions
+# use augment to get topic assignment for each term
+assignments <- augment(lda_3, data = dtm)
+
+# separate document name
+assignments <- assignments %>%
+  separate(document, c("book", "chapter"), sep = "_", remove = FALSE) %>%
+  left_join(book_consensus, by = "book")
+
+# count term assignments per book and topic
+word_counts <- assignments %>%
+  count(book, .topic, wt = count) %>%
+  group_by(book) %>%
+  mutate(percent = n / sum(n))
+
+# plot heatmap
+ggplot(word_counts, aes(x = factor(.topic), y = book, fill = percent)) +
+  geom_tile() +
+  geom_text(aes(label = scales::percent(percent, accuracy = 1))) +
+  scale_fill_gradient(low = "white", high = "steelblue", labels = percent_format()) +
+  labs(x = "Topic", y = "Book",
+       fill = "% of words",
+       title = "Assignment of words from each book to topics")
+```
+The heatmap shows that Topic 1 words come almost entirely from Pride and Prejudice, Topic 2 mainly from Twenty Thousand Leagues under the Sea, and Topic 3 mainly from The War of the Worlds. This confirms that the k=3 model successfully captures the thematic differences between books, with high accuracy.
+
+```{r}
+# Validate preprocessing effects using preText
+## Convert raw data to a quanteda corpus (each line is a "document"; sample 500 lines to save time)
+corp <- corpus(books, text_field = "text")
+set.seed(123)
+documents <- corp[sample(1:length(corp), 500)]
+
+## apply multiple preprocessing combinations (including n-grams, filtering low-frequency terms)
+preprocessed_docs <- factorial_preprocessing(
+  documents,
+  use_ngrams = TRUE,
+  infrequent_term_threshold = 0.2,
+  verbose = FALSE
+)
+
+## compute preText scores
+preText_results <- preText(
+  preprocessed_docs,
+  dataset_name = "Gutenberg Books Sample",
+  distance_method = "cosine",
+  num_comparisons = 20,
+  verbose = FALSE
+)
+
+## plot score plot
+preText_score_plot(preText_results)
+```
+Lower scores (left side) indicate preprocessing recipes that are more "typical" (closer to the average of all recipes). The plot shows that recipes including n-grams, no stemming, or keeping punctuation tend to produce more extreme results (right side), while more conventional preprocessing (e.g., only removing punctuation and stop words) scores in the middle.
+
+```{r}
+## examine regression coefficients for each preprocessing step
+regression_coefficient_plot(preText_results, remove_intercept = TRUE)
+```
+
+This plot shows the effect of each preprocessing step (e.g., stemming, remove numbers) on the preText score. Positive coefficients indicate that the step makes the text distance deviate from the "typical" state; negative coefficients indicate it makes results more typical. We see that using n-grams significantly increases the distinctiveness, while removing punctuation has a relatively small effect. Therefore, in practice, if we want more robust results, we might prioritize preprocessing steps with coefficients near zero or negative.
+
+In this exercise, I:
+
+Downloaded three books with different themes from Project Gutenberg and treated each chapter as a separate document.
+Ran topic models with different k values, chose k=5 for detailed analysis based on perplexity and interpretability.
+Quantitatively evaluated the k=3 model, achieving over 95% overall accuracy, with clear topic-book correspondence.
+Used preText to validate preprocessing effects, finding that n-grams are the most influential factor, reminding us to choose preprocessing carefully.
+
+The results suggest that a model with k = 5 provides the most interpretable topics. The topics broadly correspond to thematic differences across the three books, including social relations in Pride and Prejudice, exploration themes in Twenty Thousand Leagues Under the Sea, and science-fiction conflict in The War of the Worlds. The preText validation further shows that preprocessing choices, such as the inclusion of n-grams and filtering infrequent terms, can influence document similarity and topic modelling results.
